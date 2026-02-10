@@ -24,6 +24,7 @@ package kcp
 
 import (
 	"container/heap"
+	"encoding/binary"
 	"sync/atomic"
 	"time"
 )
@@ -102,46 +103,6 @@ type output_callback func(buf []byte, size int)
 // logoutput_callback is a prototype which logging kcp trace output
 type logoutput_callback func(msg string, args ...any)
 
-// segmentHeader is the wire format of a KCP segment header (24 bytes).
-// The struct layout exactly matches the KCP protocol wire format with no padding.
-//
-//	offset 0:  conv   (uint32)  - conversation id
-//	offset 4:  cmd    (uint8)   - command
-//	offset 5:  frg    (uint8)   - fragment count
-//	offset 6:  wnd    (uint16)  - window size
-//	offset 8:  ts     (uint32)  - timestamp
-//	offset 12: sn     (uint32)  - sequence number
-//	offset 16: una    (uint32)  - unacknowledged sequence number
-//	offset 20: length (uint32)  - data length
-type segmentHeader struct {
-	conv   uint32
-	cmd    uint8
-	frg    uint8
-	wnd    uint16
-	ts     uint32
-	sn     uint32
-	una    uint32
-	length uint32
-}
-
-func _imin_(a, b uint32) uint32 {
-	if a <= b {
-		return a
-	}
-	return b
-}
-
-func _imax_(a, b uint32) uint32 {
-	if a >= b {
-		return a
-	}
-	return b
-}
-
-func _ibound_(lower, middle, upper uint32) uint32 {
-	return _imin_(_imax_(lower, middle), upper)
-}
-
 func _itimediff(later, earlier uint32) int32 {
 	return (int32)(later - earlier)
 }
@@ -165,16 +126,15 @@ type segment struct {
 
 // encode a segment header into buffer
 func (seg *segment) encode(ptr []byte) []byte {
-	encodeSegHeader(ptr, segmentHeader{
-		conv:   seg.conv,
-		cmd:    seg.cmd,
-		frg:    seg.frg,
-		wnd:    seg.wnd,
-		ts:     seg.ts,
-		sn:     seg.sn,
-		una:    seg.una,
-		length: uint32(len(seg.data)),
-	})
+	_ = ptr[IKCP_OVERHEAD-1] // BCE hint
+	binary.LittleEndian.PutUint32(ptr, seg.conv)
+	ptr[4] = seg.cmd
+	ptr[5] = seg.frg
+	binary.LittleEndian.PutUint16(ptr[6:], seg.wnd)
+	binary.LittleEndian.PutUint32(ptr[8:], seg.ts)
+	binary.LittleEndian.PutUint32(ptr[12:], seg.sn)
+	binary.LittleEndian.PutUint32(ptr[16:], seg.una)
+	binary.LittleEndian.PutUint32(ptr[20:], uint32(len(seg.data)))
 	atomic.AddUint64(&DefaultSnmp.OutSegs, 1)
 	return ptr[IKCP_OVERHEAD:]
 }
@@ -467,8 +427,8 @@ func (kcp *KCP) update_ack(rtt int32) {
 			kcp.rx_rttvar += (delta - kcp.rx_rttvar) >> 2
 		}
 	}
-	rto = uint32(kcp.rx_srtt) + _imax_(kcp.interval, uint32(kcp.rx_rttvar)<<2)
-	kcp.rx_rto = _ibound_(kcp.rx_minrto, rto, IKCP_RTO_MAX)
+	rto = uint32(kcp.rx_srtt) + max(kcp.interval, uint32(kcp.rx_rttvar)<<2)
+	kcp.rx_rto = min(max(kcp.rx_minrto, rto), IKCP_RTO_MAX)
 }
 
 func (kcp *KCP) shrink_buf() {
@@ -600,21 +560,20 @@ func (kcp *KCP) Input(data []byte, pktType PacketType, ackNoDelay bool) int {
 			break
 		}
 
-		var hdr segmentHeader
-		decodeSegHeader(data, &hdr)
-		if hdr.conv != kcp.conv {
+		_ = data[IKCP_OVERHEAD-1] // BCE hint
+		conv := binary.LittleEndian.Uint32(data)
+		cmd := data[4]
+		frg := data[5]
+		wnd := binary.LittleEndian.Uint16(data[6:])
+		ts := binary.LittleEndian.Uint32(data[8:])
+		sn := binary.LittleEndian.Uint32(data[12:])
+		una := binary.LittleEndian.Uint32(data[16:])
+		length := binary.LittleEndian.Uint32(data[20:])
+		data = data[IKCP_OVERHEAD:]
+
+		if conv != kcp.conv {
 			return -1
 		}
-
-		conv := hdr.conv
-		cmd := hdr.cmd
-		frg := hdr.frg
-		wnd := hdr.wnd
-		ts := hdr.ts
-		sn := hdr.sn
-		una := hdr.una
-		length := hdr.length
-		data = data[IKCP_OVERHEAD:]
 
 		kcp.debugLog(IKCP_LOG_INPUT, "conv", conv, "cmd", cmd, "frg", frg, "wnd", wnd, "ts", ts, "sn", sn, "una", una, "len", length, "datalen", len(data))
 
@@ -636,41 +595,37 @@ func (kcp *KCP) Input(data []byte, pktType PacketType, ackNoDelay bool) int {
 		}
 		kcp.shrink_buf()
 
-		if cmd == IKCP_CMD_ACK {
+		switch cmd {
+		case IKCP_CMD_ACK:
 			kcp.debugLog(IKCP_LOG_IN_ACK, "conv", conv, "sn", sn, "una", una, "ts", ts, "rto", kcp.rx_rto)
 			kcp.parse_ack(sn)
 			flushSegments |= kcp.parse_fastack(sn, ts)
 			updateRTT |= 1
 			latest = ts
-		} else if cmd == IKCP_CMD_PUSH {
+		case IKCP_CMD_PUSH:
 			repeat := true
 			if _itimediff(sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.ack_push(sn, ts)
 				if _itimediff(sn, kcp.rcv_nxt) >= 0 {
-					var seg segment
-					seg.conv = conv
-					seg.cmd = cmd
-					seg.frg = frg
-					seg.wnd = wnd
-					seg.ts = ts
-					seg.sn = sn
-					seg.una = una
-					seg.data = data[:length] // delayed data copying
-					repeat = kcp.parse_data(seg)
+					repeat = kcp.parse_data(segment{
+						conv: conv, cmd: cmd, frg: frg, wnd: wnd,
+						ts: ts, sn: sn, una: una,
+						data: data[:length], // delayed data copying
+					})
 				}
 			}
 			if pktType == IKCP_PACKET_REGULAR && repeat {
 				atomic.AddUint64(&DefaultSnmp.RepeatSegs, 1)
 			}
 			kcp.debugLog(IKCP_LOG_IN_PUSH, "conv", conv, "sn", sn, "una", una, "ts", ts, "packettype", pktType, "repeat", repeat)
-		} else if cmd == IKCP_CMD_WASK {
+		case IKCP_CMD_WASK:
 			// ready to send back IKCP_CMD_WINS in Ikcp_flush
 			// tell remote my window size
 			kcp.probe |= IKCP_ASK_TELL
 			kcp.debugLog(IKCP_LOG_IN_WASK, "conv", conv, "wnd", wnd, "ts", ts)
-		} else if cmd == IKCP_CMD_WINS {
+		case IKCP_CMD_WINS:
 			kcp.debugLog(IKCP_LOG_IN_WINS, "conv", conv, "wnd", wnd, "ts", ts)
-		} else {
+		default:
 			return -3
 		}
 
@@ -839,9 +794,9 @@ func (kcp *KCP) flush(flushType FlushType) (nextUpdate uint32) {
 	kcp.probe = 0
 
 	// calculate window size
-	cwnd := _imin_(kcp.snd_wnd, kcp.rmt_wnd)
+	cwnd := min(kcp.snd_wnd, kcp.rmt_wnd)
 	if kcp.nocwnd == 0 {
-		cwnd = _imin_(kcp.cwnd, cwnd)
+		cwnd = min(kcp.cwnd, cwnd)
 	}
 
 	// sliding window, controlled by snd_nxt && sna_una+cwnd
