@@ -83,8 +83,11 @@ build_target() {
 
     local suffix=$(get_suffix "${arch}" "${goarm}")
 
-    local client_out="${BUILD_DIR}/client_${os}_${suffix}${ext}"
-    local server_out="${BUILD_DIR}/server_${os}_${suffix}${ext}"
+    local target_dir="${BUILD_DIR}/kcptun_${os}_${suffix}"
+    mkdir -p "${target_dir}"
+
+    local client_out="${target_dir}/kcptun_client${ext}"
+    local server_out="${target_dir}/kcptun_server${ext}"
 
     echo "--- Building ${os}/${suffix} ---"
 
@@ -106,43 +109,6 @@ build_target() {
     fi
 }
 
-# Packages the compiled binaries into a tar.gz archive.
-# The archive directly contains the two binaries (client/server).
-package_target() {
-    local os=$1
-    local arch=$2
-    local goarm=$3
-    local gomips=$4
-
-    # Determine file extension and suffix
-    local ext=""
-    if [ "${os}" == "windows" ]; then
-        ext=".exe"
-    fi
-    local suffix=$(get_suffix "${arch}" "${goarm}") 
-
-    # Full filenames in the BUILD_DIR
-    local client_bin="client_${os}_${suffix}${ext}"
-    local server_bin="server_${os}_${suffix}${ext}"
-    
-    # Archive name format: kcptun-os-suffix-VERSION.tar.gz
-    local package_name="kcptun-${os}-${suffix}-${VERSION}"
-    local archive_file="${package_name}.tar.gz"
-
-    echo "--- Packaging ${package_name} ---"
-
-    # Create the tarball directly from the binaries (no intermediate directory inside the archive)
-    (
-        cd "${BUILD_DIR}" && \
-        tar -czf "${archive_file}" "${client_bin}" "${server_bin}"
-    )
-
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to create package ${archive_file}"
-        return 1
-    fi
-}
-
 # --- Main Execution ---
 
 # 1. Initialize the build directory
@@ -154,21 +120,7 @@ for target in "${TARGETS[@]}"; do
     IFS='/' read -r OS ARCH GOARM GOMIPS <<< "$target"
 
     build_target "$OS" "$ARCH" "$GOARM" "$GOMIPS" || exit 1
-    package_target "$OS" "$ARCH" "$GOARM" "$GOMIPS" || exit 1
 done
 
-# 3. Clean up intermediate binaries (client_* and server_* files)
-echo "--- Cleaning intermediate binaries ---"
-find "${BUILD_DIR}" -type f -regex "${BUILD_DIR}/\(client\|server\)_.*" -delete
-
-# 4. Generate SHA1 checksums file
-echo "--- Generating SHA1 Checksums ---"
-(cd "${BUILD_DIR}" && $SUM_TOOL *.tar.gz > SHA1SUMS)
-
-# 5. Output checksums to console 
-echo "--- SHA1SUMS Output ---"
-cat "${BUILD_DIR}/SHA1SUMS"
-echo "---"
-
 echo "--- Build Complete ---"
-echo "All release packages are located in ${BUILD_DIR}/"
+echo "All compiled binaries are located in ${BUILD_DIR}/"
