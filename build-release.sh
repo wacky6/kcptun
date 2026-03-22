@@ -11,21 +11,13 @@ TARGETS=(
     "darwin/amd64//" 
     "darwin/arm64//"
     
-    "freebsd/amd64//"
-    
-    "linux/386//" 
     "linux/amd64//" 
     "linux/arm/5/"          # ARMv5
     "linux/arm/6/"          # ARMv6
     "linux/arm/7/"          # ARMv7
     "linux/arm64//" 
-    "linux/loong64//"
-    "linux/mips//softfloat" 
-    "linux/mipsle//softfloat" 
     
-    "windows/386//" 
     "windows/amd64//" 
-    "windows/arm64//"
 )
 
 # Full Go package import paths
