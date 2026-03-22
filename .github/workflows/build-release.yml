@@ -1,0 +1,64 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - fork
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: fork
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+
+      - name: Install zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+
+      - name: Run build-release.sh
+        run: |
+          chmod +x ./build-release.sh
+          ./build-release.sh
+
+      - name: Encrypt build output
+        env:
+          KDF_SECRET: ${{ secrets.KDF_SECRET }}
+          KDF_SALT: ${{ secrets.KDF_SALT }}
+        run: |
+          ZIP_PASSWORD=$(openssl kdf -keylen 32 -binary \
+            -kdfopt digest:SHA256 \
+            -kdfopt pass:"$KDF_SECRET" \
+            -kdfopt salt:"$KDF_SALT" \
+            -kdfopt iter:100000 \
+            PBKDF2 | openssl base64)
+          mkdir -p build_encrypted
+          cd build
+          for file in *; do
+            if [ -f "$file" ]; then
+              zip -P "$ZIP_PASSWORD" "../build_encrypted/${file}_pkdf2_key0.zip" "$file"
+            fi
+          done
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.date.outputs.date }}
+          name: Release ${{ steps.date.outputs.date }}
+          files: build_encrypted/*
